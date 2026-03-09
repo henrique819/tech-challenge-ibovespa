@@ -27,7 +27,11 @@ st.markdown("""
 @st.cache_data(ttl=3600)
 def get_full_data():
     try:
+        # Baixa os dados
         df = yf.download("^BVSP", period="2y", interval="1d", progress=False)
+        if df.empty: return None
+        
+        # Limpa nomes de colunas (MultiIndex fix)
         df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
         
         # Engenharia de Features
@@ -39,28 +43,49 @@ def get_full_data():
         df['Dist_Banda'] = (df['Close'] - df['Banda_Sup']) / df['Banda_Sup']
         df['Dia'] = df.index.dayofweek
         
-        # Target
+        # Target (Amanhã será maior que Hoje?)
         df['Tendencia'] = (df['Close'].shift(-1) > df['Close']).astype(int)
-        return df.dropna()
-    except: return None
+        
+        # --- LIMPEZA BLINDADA ---
+        # Substitui infinitos por NaN e depois dropa tudo que for NaN
+        df = df.replace([np.inf, -np.inf], np.nan)
+        df = df.dropna()
+        
+        return df
+    except:
+        return None
 
 df_total = get_full_data()
 
 def treinar_modelo(df):
+    if df is None: return None, None, 0
+    
     features = ['Retorno', 'Dia', 'Var_Vol', 'Dist_Banda']
     dias_teste = 30
-    treino = df.iloc[:-dias_teste]
-    teste = df.iloc[-dias_teste:]
     
+    # Separação
+    treino = df.iloc[:-dias_teste].copy()
+    teste = df.iloc[-dias_teste:].copy()
+    
+    # Normalização
     scaler = StandardScaler()
     X_tr = scaler.fit_transform(treino[features])
     X_ts = scaler.transform(teste[features])
     
+    # Modelo
     modelo = GradientBoostingClassifier(learning_rate=0.2, max_depth=2, n_estimators=200, random_state=42)
     modelo.fit(X_tr, treino['Tendencia'])
-    return teste, modelo.predict(X_ts), accuracy_score(teste['Tendencia'], modelo.predict(X_ts))
+    
+    preds = modelo.predict(X_ts)
+    acc = accuracy_score(teste['Tendencia'], preds)
+    return teste, preds, acc
 
+# Execução
 teste_df, previsoes, acc = treinar_modelo(df_total)
+
+if df_total is None:
+    st.error("⚠️ Erro crítico ao processar dados. Tente recarregar.")
+    st.stop()
 
 # ==========================================
 # HEADER
@@ -71,7 +96,6 @@ with col_h1:
     v_atual = df_total['Close'].iloc[-1]
     v_ontem = df_total['Close'].iloc[-2]
     var_pct = ((v_atual / v_ontem) - 1) * 100
-    # Formato 175.589
     st.metric(label="B3 - IBOV Realtime", value=f"{v_atual:,.0f}".replace(",", "."), delta=f"{var_pct:.2f}%")
 
 aba_geral, aba_grafico, aba_historico = st.tabs(["Geral", "Gráfico Interativo", "Dados Históricos"])
@@ -100,22 +124,22 @@ with aba_grafico:
     
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
-    # 1. Candlestick (Ouro do Trading)
+    # Candlestick
     fig.add_trace(go.Candlestick(
         x=df_total.index, open=df_total['Open'], high=df_total['High'], 
-        low=df_total['Low'], close=df_total['Close'], name='Candlestick',
+        low=df_total['Low'], close=df_total['Close'], name='IBOV',
         increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
     ), row=1, col=1)
 
-    # 2. Sinais da IA (Sinalização sobre as velas)
-    sinais_y = teste_df['High'] * 1.02 # Posiciona o sinal um pouco acima da vela
+    # Marcadores da IA
+    sinais_y = teste_df['High'] * 1.02
     fig.add_trace(go.Scatter(
-        x=teste_df.index, y=sinais_y, mode='markers', name='Sinal IA',
+        x=teste_df.index, y=sinais_y, mode='markers', name='Previsão',
         marker=dict(color=['#008000' if p == 1 else '#FF0000' for p in previsoes], 
                     size=10, symbol=['triangle-up' if p==1 else 'triangle-down' for p in previsoes])
     ), row=1, col=1)
 
-    # 3. Volume
+    # Volume
     vol_colors = ['#26a69a' if df_total['Close'].iloc[i] >= df_total['Open'].iloc[i] else '#ef5350' 
                   for i in range(len(df_total))]
     fig.add_trace(go.Bar(x=df_total.index, y=df_total['Volume'], name='Volume', marker_color=vol_colors), row=2, col=1)
