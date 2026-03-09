@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import time
+from plotly.subplots import make_subplots
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score
@@ -11,148 +11,136 @@ from sklearn.metrics import accuracy_score
 # ==========================================
 # CONFIGURAÇÃO DA PÁGINA
 # ==========================================
-st.set_page_config(page_title="Terminal IBOV - Tech Challenge", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Terminal IBOV - Elite", layout="wide", page_icon="📈")
 
-# Estilo CSS para melhorar a visualização e cores das métricas
+# Estilo CSS Investing Style
 st.markdown("""
     <style>
-    .main { background-color: #0e1117; }
-    [data-testid="stMetricValue"] { font-size: 28px; font-weight: bold; }
+    .main { background-color: #f8f9fa; color: #333; }
+    [data-testid="stMetricValue"] { font-size: 32px; font-weight: 700; color: #1e222d; }
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; border-bottom: 2px solid #e0e3eb; }
+    .stTabs [data-baseweb="tab"] { height: 50px; font-weight: 600; color: #70757a; }
+    .stTabs [aria-selected="true"] { color: #2962FF !important; border-bottom: 2px solid #2962FF !important; }
     </style>
     """, unsafe_allow_html=True)
 
 @st.cache_data(ttl=3600)
-def carregar_e_treinar_modelo():
+def get_full_data():
     try:
-        # Coleta de dados resiliente
         df = yf.download("^BVSP", period="2y", interval="1d", progress=False)
-        if df.empty: return None, None, None
-        
-        # Limpeza de MultiIndex
         df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-        df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-    except:
-        return None, None, None
+        
+        # Engenharia de Features
+        df['Retorno'] = df['Close'].pct_change()
+        df['Var_Vol'] = df['Volume'].pct_change()
+        df['MM_20'] = df['Close'].rolling(window=20).mean()
+        df['Std_20'] = df['Close'].rolling(window=20).std()
+        df['Banda_Sup'] = df['MM_20'] + (df['Std_20'] * 2)
+        df['Dist_Banda'] = (df['Close'] - df['Banda_Sup']) / df['Banda_Sup']
+        df['Dia'] = df.index.dayofweek
+        
+        # Target
+        df['Tendencia'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+        return df.dropna()
+    except: return None
 
-    # Engenharia de Features
-    df['Retorno'] = df['Close'].pct_change()
-    df['Variacao_Volume'] = df['Volume'].pct_change()
-    df['Retorno_Ontem'] = df['Retorno'].shift(1)
-    df['Retorno_Anteontem'] = df['Retorno'].shift(2)
-    df['Dia_Semana'] = df.index.dayofweek
-    df['MM_20'] = df['Close'].rolling(window=20).mean()
-    df['Desvio_20'] = df['Close'].rolling(window=20).std()
-    df['Banda_Superior'] = df['MM_20'] + (df['Desvio_20'] * 2)
-    df['Dist_Banda_Sup'] = (df['Close'] - df['Banda_Superior']) / df['Banda_Superior']
-    
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df = df.dropna()
-    
-    # Target: Amanhã será maior que hoje?
-    df['Fechamento_Amanha'] = df['Close'].shift(-1)
-    df['Tendencia'] = (df['Fechamento_Amanha'] > df['Close']).astype(int)
-    df = df.dropna()
-    
-    # Separação de Teste (30 dias)
+df_total = get_full_data()
+
+def treinar_modelo(df):
+    features = ['Retorno', 'Dia', 'Var_Vol', 'Dist_Banda']
     dias_teste = 30
     treino = df.iloc[:-dias_teste]
     teste = df.iloc[-dias_teste:]
     
-    features = ['Retorno', 'Retorno_Ontem', 'Retorno_Anteontem', 'Dia_Semana', 'Variacao_Volume', 'Dist_Banda_Sup']
     scaler = StandardScaler()
-    X_treino = scaler.fit_transform(treino[features])
-    X_teste = scaler.transform(teste[features])
+    X_tr = scaler.fit_transform(treino[features])
+    X_ts = scaler.transform(teste[features])
     
-    # Modelo
     modelo = GradientBoostingClassifier(learning_rate=0.2, max_depth=2, n_estimators=200, random_state=42)
-    modelo.fit(X_treino, treino['Tendencia'])
-    
-    previsoes = modelo.predict(X_teste)
-    acc = accuracy_score(teste['Tendencia'], previsoes)
-    
-    return teste, previsoes, acc
+    modelo.fit(X_tr, treino['Tendencia'])
+    return teste, modelo.predict(X_ts), accuracy_score(teste['Tendencia'], modelo.predict(X_ts))
 
-# Execução do Core
-teste_df, previsoes_modelo, acuracia = carregar_e_treinar_modelo()
-
-if teste_df is None:
-    st.error("⚠️ Erro na conexão com o Yahoo Finance. Recarregue a página.")
-    st.stop()
+teste_df, previsoes, acc = treinar_modelo(df_total)
 
 # ==========================================
-# INTERFACE PRINCIPAL
+# HEADER
 # ==========================================
+st.write(f"### Ibovespa (IBOV)")
+col_h1, col_h2 = st.columns([1, 4])
+with col_h1:
+    v_atual = df_total['Close'].iloc[-1]
+    v_ontem = df_total['Close'].iloc[-2]
+    var_pct = ((v_atual / v_ontem) - 1) * 100
+    # Formato 175.589
+    st.metric(label="B3 - IBOV Realtime", value=f"{v_atual:,.0f}".replace(",", "."), delta=f"{var_pct:.2f}%")
 
-st.title("📟 Terminal de Inteligência Quantitativa | IBOVESPA")
+aba_geral, aba_grafico, aba_historico = st.tabs(["Geral", "Gráfico Interativo", "Dados Históricos"])
 
-# Barra Lateral com Filtros
-st.sidebar.header("Painel de Controle")
-filtro_tendencia = st.sidebar.multiselect(
-    "Filtrar Tendência Real:",
-    options=['Alta', 'Baixa'],
-    default=['Alta', 'Baixa']
-)
+# --- ABA GERAL ---
+with aba_geral:
+    st.markdown("#### Performance Acumulada")
+    def ret_cor(d):
+        v = ((df_total['Close'].iloc[-1] / df_total['Close'].iloc[-d]) - 1) * 100
+        return f":{'green' if v > 0 else 'red'}[{v:.2f}%]"
 
-# --- BLOCO DE MÉTRICAS (Igual ao Investing/Warren) ---
-col1, col2, col3, col4 = st.columns(4)
+    st.table(pd.DataFrame({
+        "Janela": ["1D", "1 Sem", "1 Mês", "6 Meses", "1 Ano"],
+        "Retorno": [ret_cor(2), ret_cor(6), ret_cor(22), ret_cor(126), ret_cor(252)]
+    }).set_index("Janela"))
+    
+    c1, c2 = st.columns(2)
+    c1.write(f"**Abertura:** {df_total['Open'].iloc[-1]:,.0f}".replace(",", "."))
+    c1.write(f"**Fechamento Ant.:** {v_ontem:,.0f}".replace(",", "."))
+    c2.write(f"**Máxima:** {df_total['High'].iloc[-1]:,.0f}".replace(",", "."))
+    c2.write(f"**Mínima:** {df_total['Low'].iloc[-1]:,.0f}".replace(",", "."))
 
-# Formatação brasileira: 178.488 em vez de 178,488.00
-ultimo_valor = float(teste_df['Close'].iloc[-1])
-col1.metric("Último IBOV", f"{ultimo_valor:,.0f}".replace(",", "."), "-0.49%")
-col2.metric("Acurácia IA", f"{acuracia * 100:.1f}%", "Meta: 75%")
-col3.metric("Janela de Teste", "30 Dias", "Último mês")
-col4.metric("Status", "ONLINE", None)
+# --- ABA GRÁFICO (CANDLESTICKS + VOLUME) ---
+with aba_grafico:
+    st.markdown("#### Terminal Avançado de Velas e Volume")
+    
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
-st.divider()
+    # 1. Candlestick (Ouro do Trading)
+    fig.add_trace(go.Candlestick(
+        x=df_total.index, open=df_total['Open'], high=df_total['High'], 
+        low=df_total['Low'], close=df_total['Close'], name='Candlestick',
+        increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
+    ), row=1, col=1)
 
-# --- GRÁFICO INTERATIVO ---
-st.subheader("Análise Gráfica de Sinais")
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=teste_df.index, y=teste_df['Close'], name='Preço Fechamento', line=dict(color='#00CCFF', width=2)))
+    # 2. Sinais da IA (Sinalização sobre as velas)
+    sinais_y = teste_df['High'] * 1.02 # Posiciona o sinal um pouco acima da vela
+    fig.add_trace(go.Scatter(
+        x=teste_df.index, y=sinais_y, mode='markers', name='Sinal IA',
+        marker=dict(color=['#008000' if p == 1 else '#FF0000' for p in previsoes], 
+                    size=10, symbol=['triangle-up' if p==1 else 'triangle-down' for p in previsoes])
+    ), row=1, col=1)
 
-# Marcadores de Previsão
-preds_color = ['#00FF00' if p == 1 else '#FF0000' for p in previsoes_modelo]
-fig.add_trace(go.Scatter(
-    x=teste_df.index, y=teste_df['Close'], mode='markers', name='Sinal IA',
-    marker=dict(color=preds_color, size=10, symbol=['triangle-up' if p==1 else 'triangle-down' for p in previsoes_modelo])
-))
-fig.update_layout(template="plotly_dark", height=400, margin=dict(l=10, r=10, t=10, b=10))
-st.plotly_chart(fig, use_container_width=True)
+    # 3. Volume
+    vol_colors = ['#26a69a' if df_total['Close'].iloc[i] >= df_total['Open'].iloc[i] else '#ef5350' 
+                  for i in range(len(df_total))]
+    fig.add_trace(go.Bar(x=df_total.index, y=df_total['Volume'], name='Volume', marker_color=vol_colors), row=2, col=1)
 
-# --- TABELA DE DADOS HISTÓRICOS (Estilo Investing) ---
-st.subheader("Histórico de Previsões e Sinais")
+    fig.update_layout(template="white", xaxis_rangeslider_visible=False, height=650, showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
 
-# Preparação dos dados para a tabela
-tabela_investing = pd.DataFrame({
-    'Preço (Pontos)': teste_df['Close'].values.flatten(),
-    'Real': ['Alta' if v == 1 else 'Baixa' for v in teste_df['Tendencia']],
-    'Previsão IA': ['Alta' if v == 1 else 'Baixa' for v in previsoes_modelo]
-}, index=teste_df.index)
+# --- ABA DADOS HISTÓRICOS ---
+with aba_historico:
+    st.markdown("#### Histórico Formatado (Investing Style)")
+    f_mov = st.multiselect("Direção:", ["Alta", "Baixa"], default=["Alta", "Baixa"])
+    
+    t_f = pd.DataFrame({
+        'Preço (Pontos)': teste_df['Close'],
+        'Real': ['Alta' if v == 1 else 'Baixa' for v in teste_df['Tendencia']],
+        'Previsão IA': ['Alta' if v == 1 else 'Baixa' for v in previsoes]
+    }).sort_index(ascending=False)
+    
+    t_f = t_f[t_f['Real'].isin(f_mov)]
+    t_f.index = t_f.index.strftime('%d/%m/%Y')
 
-# Aplicar filtros e inverter ordem (Mais recente no topo)
-tabela_investing = tabela_investing[tabela_investing['Real'].isin(filtro_tendencia)]
-tabela_investing = tabela_investing.sort_index(ascending=False)
-
-# Função para colorir o texto (Verde para Alta, Vermelho para Baixa)
-def colorir_texto(val):
-    cor = '#00FF00' if 'Alta' in str(val) else '#FF0000'
-    return f'color: {cor}; font-weight: bold'
-
-# Formatação final e exibição
-st.dataframe(
-    tabela_investing.style
-    .format({'Preço (Pontos)': "{:,.0f}"}, thousands=".", decimal=",")
-    .applymap(colorir_texto, subset=['Real', 'Previsão IA']),
-    use_container_width=True,
-    height=500
-)
-
-# Rodapé profissional
-st.markdown("---")
-col_down1, col_down2 = st.columns([4,1])
-with col_down1:
-    st.caption("Terminal de dados em tempo real. Os sinais são baseados em algoritmos de Gradient Boosting.")
-with col_down2:
-    # Botão de download igual ao Investing
-    csv = tabela_investing.to_csv().encode('utf-8')
-    st.download_button("📥 Baixar Histórico", data=csv, file_name='historico_ibov.csv', mime='text/csv')
+    st.dataframe(
+        t_f.style
+        .format({'Preço (Pontos)': "{:,.0f}"}, thousands=".", decimal=",")
+        .applymap(lambda x: f"color: {'#008000' if x=='Alta' else '#d91e18'}; font-weight: bold", 
+                  subset=['Real', 'Previsão IA']),
+        use_container_width=True, height=500
+    )
