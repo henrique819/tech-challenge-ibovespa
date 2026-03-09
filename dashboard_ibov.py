@@ -13,7 +13,7 @@ from sklearn.metrics import accuracy_score
 # ==========================================
 st.set_page_config(page_title="Terminal IBOV - Tech Challenge", layout="wide", page_icon="📈")
 
-# CSS para clonar o visual clean do Investing.com
+# CSS para o visual Investing.com
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; color: #333; }
@@ -30,14 +30,13 @@ st.markdown("""
 @st.cache_data(ttl=3600)
 def get_full_data():
     try:
-        # Coleta 2 anos para ter base de treino e cálculo de indicadores de longo prazo
         df = yf.download("^BVSP", period="2y", interval="1d", progress=False)
         if df.empty: return None
         
-        # Correção de MultiIndex (Yahoo Finance)
+        # Correção de MultiIndex
         df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
         
-        # Engenharia de Features
+        # Feature Engineering Avançada
         df['Retorno'] = df['Close'].pct_change()
         df['Var_Vol'] = df['Volume'].pct_change()
         df['MM_20'] = df['Close'].rolling(window=20).mean()
@@ -49,20 +48,20 @@ def get_full_data():
         # Target: Amanhã > Hoje?
         df['Tendencia'] = (df['Close'].shift(-1) > df['Close']).astype(int)
         
-        # Limpeza blindada de NaNs e Infs (evita erro no Scaler)
+        # Limpeza total de NaNs e Infs
         df = df.replace([np.inf, -np.inf], np.nan).dropna()
         return df
     except:
         return None
 
 # ==========================================
-# 3. MODELO DE MACHINE LEARNING
+# 3. MODELO DE MACHINE LEARNING (VERSÃO TUNADA)
 # ==========================================
 def treinar_modelo(df):
     if df is None: return None, None, 0
     
     features = ['Retorno', 'Dia_Semana', 'Var_Vol', 'Dist_Banda']
-    dias_teste = 30 # Conforme enunciado do desafio
+    dias_teste = 30 
     
     treino = df.iloc[:-dias_teste].copy()
     teste = df.iloc[-dias_teste:].copy()
@@ -71,37 +70,39 @@ def treinar_modelo(df):
     X_tr = scaler.fit_transform(treino[features])
     X_ts = scaler.transform(teste[features])
     
-    # Gradient Boosting Tunado
-    modelo = GradientBoostingClassifier(learning_rate=0.2, max_depth=2, n_estimators=200, random_state=42)
+    # --- HIPERPARÂMETROS OTIMIZADOS ---
+    modelo = GradientBoostingClassifier(
+        n_estimators=350,      # Mais árvores para aprender padrões finos
+        learning_rate=0.1,     # Passo menor para evitar overfitting
+        max_depth=3,           # Profundidade moderada para captar correlações
+        random_state=42
+    )
     modelo.fit(X_tr, treino['Tendencia'])
     
     preds = modelo.predict(X_ts)
     acc = accuracy_score(teste['Tendencia'], preds)
     return teste, preds, acc
 
-# Execução do Processamento
+# Execução
 df_total = get_full_data()
 teste_df, previsoes, acuracia = treinar_modelo(df_total)
 
 if df_total is None:
-    st.error("⚠️ Erro na conexão com dados financeiros. Recarregue a página.")
+    st.error("⚠️ Falha na conexão com o Yahoo Finance.")
     st.stop()
 
 # ==========================================
-# 4. INTERFACE DO USUÁRIO (UI)
+# 4. INTERFACE DO USUÁRIO
 # ==========================================
 
-# Header Principal
 st.write(f"### Ibovespa (IBOV)")
 col_h1, col_h2 = st.columns([1, 4])
 with col_h1:
     v_atual = df_total['Close'].iloc[-1]
     v_ontem = df_total['Close'].iloc[-2]
     var_pct = ((v_atual / v_ontem) - 1) * 100
-    # Formatação Brasileira 175.589
     st.metric(label="B3 - IBOV Realtime", value=f"{v_atual:,.0f}".replace(",", "."), delta=f"{var_pct:.2f}%")
 
-# Sistema de Abas
 aba_geral, aba_grafico, aba_historico = st.tabs(["Geral", "Gráfico Interativo", "Dados Históricos"])
 
 # --- ABA GERAL ---
@@ -112,30 +113,24 @@ with aba_geral:
         return f":{'green' if v > 0 else 'red'}[{v:.2f}%]"
 
     perf_data = pd.DataFrame({
-        "Janela": ["1 Dia", "1 Semana", "1 Mês", "6 Meses", "1 Ano"],
-        "Retorno": [ret_cor(2), ret_cor(6), ret_cor(22), ret_cor(126), ret_cor(252)]
+        "Janela": ["1D", "1 Sem", "1 Mês", "6 Meses", "1 Ano"],
+        "Variação": [ret_cor(2), ret_cor(6), ret_cor(22), ret_cor(126), ret_cor(252)]
     }).set_index("Janela")
     st.table(perf_data)
     
-    st.markdown("#### Fundamentos de Hoje")
     c1, c2 = st.columns(2)
     c1.write(f"**Abertura:** {df_total['Open'].iloc[-1]:,.0f}".replace(",", "."))
     c1.write(f"**Fechamento Ant.:** {v_ontem:,.0f}".replace(",", "."))
-    c2.write(f"**Máxima Diária:** {df_total['High'].iloc[-1]:,.0f}".replace(",", "."))
-    c2.write(f"**Mínima Diária:** {df_total['Low'].iloc[-1]:,.0f}".replace(",", "."))
+    c2.write(f"**Máxima:** {df_total['High'].iloc[-1]:,.0f}".replace(",", "."))
+    c2.write(f"**Mínima:** {df_total['Low'].iloc[-1]:,.0f}".replace(",", "."))
 
 # --- ABA GRÁFICO (CANDLESTICK + VOLUME + ZOOM) ---
 with aba_grafico:
     st.markdown("#### Terminal de Análise Técnica")
     
-    # Seletor para despoluir o gráfico
     col_zoom, _ = st.columns([2, 3])
     with col_zoom:
-        periodo = st.select_slider(
-            "Visualizar período:",
-            options=["1 Mês", "3 Meses", "6 Meses", "1 Ano", "Tudo"],
-            value="3 Meses"
-        )
+        periodo = st.select_slider("Janela de tempo:", options=["1 Mês", "3 Meses", "6 Meses", "1 Ano", "Tudo"], value="3 Meses")
 
     map_p = {"1 Mês": 22, "3 Meses": 66, "6 Meses": 126, "1 Ano": 252, "Tudo": len(df_total)}
     df_p = df_total.tail(map_p[periodo])
@@ -143,14 +138,14 @@ with aba_grafico:
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
-    # 1. Candlestick
+    # Candlestick
     fig.add_trace(go.Candlestick(
         x=df_p.index, open=df_p['Open'], high=df_p['High'], 
         low=df_p['Low'], close=df_p['Close'], name='IBOV',
         increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
     ), row=1, col=1)
 
-    # 2. Sinais da IA (Triângulos)
+    # Sinais da IA (Triângulos)
     if not teste_p.empty:
         idx_start = len(teste_df) - len(teste_p)
         preds_p = previsoes[idx_start:]
@@ -161,11 +156,10 @@ with aba_grafico:
                         line=dict(width=1, color='white'))
         ), row=1, col=1)
 
-    # 3. Volume
+    # Volume
     v_colors = ['#26a69a' if df_p['Close'].iloc[i] >= df_p['Open'].iloc[i] else '#ef5350' for i in range(len(df_p))]
     fig.add_trace(go.Bar(x=df_p.index, y=df_p['Volume'], marker_color=v_colors, opacity=0.8), row=2, col=1)
 
-    # Ajustes de Eixos e Layout
     fig.update_xaxes(rangeslider_visible=False)
     fig.update_yaxes(tickformat=",.0f", row=1, col=1)
     fig.update_layout(template="plotly_white", height=600, showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
@@ -173,29 +167,21 @@ with aba_grafico:
 
 # --- ABA DADOS HISTÓRICOS ---
 with aba_historico:
-    st.markdown("#### Filtros de Movimento")
-    f_mov = st.multiselect("Direção Real:", ["Alta", "Baixa"], default=["Alta", "Baixa"])
-    
+    st.markdown("#### Histórico de Sinais")
     t_f = pd.DataFrame({
         'Preço (Pontos)': teste_df['Close'],
         'Real': ['Alta' if v == 1 else 'Baixa' for v in teste_df['Tendencia']],
         'Previsão IA': ['Alta' if v == 1 else 'Baixa' for v in previsoes]
     }).sort_index(ascending=False)
     
-    t_f = t_f[t_f['Real'].isin(f_mov)]
     t_f.index = t_f.index.strftime('%d/%m/%Y')
 
     st.dataframe(
         t_f.style
         .format({'Preço (Pontos)': "{:,.0f}"}, thousands=".", decimal=",")
-        .applymap(lambda x: f"color: {'#008000' if x=='Alta' else '#d91e18'}; font-weight: bold", 
-                  subset=['Real', 'Previsão IA']),
+        .applymap(lambda x: f"color: {'#008000' if x=='Alta' else '#d91e18'}; font-weight: bold", subset=['Real', 'Previsão IA']),
         use_container_width=True, height=500
     )
 
-    # Botão de Download CSV
-    csv = t_f.to_csv().encode('utf-8')
-    st.download_button("📥 Baixar Histórico CSV", csv, "historico_ibovespa.csv", "text/csv")
-
 st.markdown("---")
-st.caption(f"Acurácia do Modelo: {acuracia*100:.2f}% | Algoritmo: Gradient Boosting Classifier")
+st.info(f"🚀 **Performance Atualizada:** {acuracia*100:.2f}% de acurácia nos últimos 30 dias.")
