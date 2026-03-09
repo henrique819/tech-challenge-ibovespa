@@ -19,21 +19,20 @@ st.set_page_config(page_title="Tech Challenge - IBOVESPA", layout="wide", page_i
 @st.cache_data(ttl=3600)
 def carregar_e_treinar_modelo():
     try:
-        # Coleta os dados
+        # Coleta os dados (yf.download é mais estável no Streamlit Cloud)
         df = yf.download("^BVSP", period="2y", interval="1d", progress=False)
         
         if df.empty:
             return None, None, None
             
-        # --- SOLUÇÃO DO ERRO: Simplifica as colunas (Remove MultiIndex) ---
+        # --- LIMPEZA DE COLUNAS (Resolve o erro MultiIndex/ValueError) ---
         df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-        # Garante que as colunas sejam apenas os nomes necessários
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
         
-    except Exception as e:
+    except Exception:
         return None, None, None
 
-    # 2. Engenharia de Features
+    # 1. Engenharia de Features
     df['Retorno'] = df['Close'].pct_change()
     df['Variacao_Volume'] = df['Volume'].pct_change()
     df['Retorno_Ontem'] = df['Retorno'].shift(1)
@@ -48,12 +47,12 @@ def carregar_e_treinar_modelo():
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df = df.dropna()
     
-    # 3. Target
+    # 2. Target (Tendência do dia seguinte)
     df['Fechamento_Amanha'] = df['Close'].shift(-1)
     df['Tendencia'] = (df['Fechamento_Amanha'] > df['Close']).astype(int)
     df = df.dropna()
     
-    # 4. Separação Treino/Teste
+    # 3. Separação Treino/Teste (Últimos 30 dias conforme solicitado)
     dias_teste = 30
     treino = df.iloc[:-dias_teste]
     teste = df.iloc[-dias_teste:]
@@ -65,12 +64,12 @@ def carregar_e_treinar_modelo():
     X_teste = teste[features]
     y_teste = teste['Tendencia']
     
-    # 5. Normalização
+    # 4. Normalização
     scaler = StandardScaler()
     X_treino_scaled = scaler.fit_transform(X_treino)
     X_teste_scaled = scaler.transform(X_teste)
     
-    # 6. Treinamento do Modelo Vencedor
+    # 5. Treinamento
     modelo = GradientBoostingClassifier(learning_rate=0.2, max_depth=2, n_estimators=200, random_state=42)
     modelo.fit(X_treino_scaled, y_treino)
     
@@ -79,53 +78,69 @@ def carregar_e_treinar_modelo():
     
     return teste, previsoes, acc
 
-# Executa a função principal
+# Execução principal
 teste_df, previsoes_modelo, acuracia = carregar_e_treinar_modelo()
 
-# Verificação se os dados carregaram
 if teste_df is None:
-    st.error("⚠️ Erro ao carregar dados do Yahoo Finance. Tente recarregar a página em alguns instantes.")
+    st.error("⚠️ Erro ao carregar dados do Yahoo Finance. Tente recarregar a página.")
     st.stop()
 
 # ==========================================
-# CONSTRUÇÃO DO DASHBOARD
+# INTERFACE DO DASHBOARD
 # ==========================================
 
 st.title("📊 Painel Preditivo Quantitativo - IBOVESPA")
-st.markdown("Desenvolvido para apoiar decisões estratégicas do time de investimentos.")
+st.markdown("Análise de tendência baseada em Machine Learning para o Tech Challenge.")
 
 st.divider()
 
-# --- SEÇÃO 1: RESULTADOS ---
+# --- BLOCO 1: MÉTRICAS ---
 col1, col2, col3 = st.columns(3)
 col1.metric("Acurácia no Teste", f"{acuracia * 100:.2f}%", "Meta: 75%")
-col2.metric("Período de Dados", "2 Anos", "Histórico")
-col3.metric("Modelo", "Gradient Boosting", "Tuned")
+col2.metric("Base Histórica", "2 Anos", "Diário")
+col3.metric("Janela de Teste", "30 Dias", "Último mês")
 
-# --- SEÇÃO 2: GRÁFICO ---
+# --- BLOCO 2: GRÁFICO INTERATIVO ---
 st.header("Sinais de Tendência (Últimos 30 Dias)")
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=teste_df.index, y=teste_df['Close'], mode='lines', name='IBOV', line=dict(color='white')))
 
+# Linha de Preço
+fig.add_trace(go.Scatter(x=teste_df.index, y=teste_df['Close'], mode='lines', name='IBOV', line=dict(color='white', width=2)))
+
+# Marcadores coloridos
 cores = ['#00FF00' if p == 1 else '#FF0000' for p in previsoes_modelo]
+simbolos = ['triangle-up' if p == 1 else 'triangle-down' for p in previsoes_modelo]
+
 fig.add_trace(go.Scatter(
     x=teste_df.index, y=teste_df['Close'], mode='markers', name='Previsão',
-    marker=dict(color=cores, size=10, symbol=['triangle-up' if p==1 else 'triangle-down' for p in previsoes_modelo])
+    marker=dict(color=cores, symbol=simbolos, size=12, line=dict(width=1, color='black')),
+    hoverinfo='text',
+    hovertext=['ALTA (↑)' if p == 1 else 'BAIXA (↓)' for p in previsoes_modelo]
 ))
-fig.update_layout(template="plotly_dark", height=450)
+
+fig.update_layout(template="plotly_dark", xaxis_title="Data", yaxis_title="Pontos", height=500)
 st.plotly_chart(fig, use_container_width=True)
 
-# --- SEÇÃO 3: TABELA ---
-with st.expander("Ver Tabela Detalhada"):
+# --- BLOCO 3: TABELA FORMATADA ---
+with st.expander("Ver Tabela Detalhada de Previsões"):
+    # Criando DataFrame formatado
     tabela = pd.DataFrame({
-        'Preço': teste_df['Close'].values.flatten().round(2),
+        # .astype(int) remove os zeros decimais poluídos
+        'Preço (Pontos)': teste_df['Close'].values.flatten().astype(int),
         'Real': ['▲ Alta' if v == 1 else '▼ Baixa' for v in teste_df['Tendencia']],
         'Previsão': ['▲ Alta' if v == 1 else '▼ Baixa' for v in previsoes_modelo]
     }, index=teste_df.index)
     
+    # Limpa a data para exibir apenas o dia
+    tabela.index = tabela.index.strftime('%d/%m/%Y')
+    
+    # Estilo colorindo o texto
     def colorir(v):
-        if 'Alta' in str(v): return 'color: #00FF00'
-        if 'Baixa' in str(v): return 'color: #FF0000'
+        if '▲ Alta' in str(v): return 'color: #00FF00; font-weight: bold;'
+        if '▼ Baixa' in str(v): return 'color: #FF0000; font-weight: bold;'
         return ''
         
     st.dataframe(tabela.style.applymap(colorir), use_container_width=True)
+
+st.divider()
+st.info("💡 As previsões representam a direção esperada para o fechamento do dia seguinte.")
