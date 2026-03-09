@@ -11,9 +11,9 @@ from sklearn.metrics import accuracy_score
 # ==========================================
 # CONFIGURAÇÃO DA PÁGINA
 # ==========================================
-st.set_page_config(page_title="Terminal IBOV - Elite", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Terminal IBOV - Master", layout="wide", page_icon="📈")
 
-# Estilo CSS Investing Style
+# Estilo CSS para clonar o visual Investing (Branco/Cinza claro)
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; color: #333; }
@@ -27,14 +27,13 @@ st.markdown("""
 @st.cache_data(ttl=3600)
 def get_full_data():
     try:
-        # Baixa os dados
         df = yf.download("^BVSP", period="2y", interval="1d", progress=False)
         if df.empty: return None
         
-        # Limpa nomes de colunas (MultiIndex fix)
+        # Limpeza de colunas MultiIndex
         df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
         
-        # Engenharia de Features
+        # Features Técnicas
         df['Retorno'] = df['Close'].pct_change()
         df['Var_Vol'] = df['Volume'].pct_change()
         df['MM_20'] = df['Close'].rolling(window=20).mean()
@@ -43,49 +42,33 @@ def get_full_data():
         df['Dist_Banda'] = (df['Close'] - df['Banda_Sup']) / df['Banda_Sup']
         df['Dia'] = df.index.dayofweek
         
-        # Target (Amanhã será maior que Hoje?)
+        # Target (Amanhã > Hoje?)
         df['Tendencia'] = (df['Close'].shift(-1) > df['Close']).astype(int)
         
-        # --- LIMPEZA BLINDADA ---
-        # Substitui infinitos por NaN e depois dropa tudo que for NaN
-        df = df.replace([np.inf, -np.inf], np.nan)
-        df = df.dropna()
-        
+        # Limpeza de valores nulos e infinitos
+        df = df.replace([np.inf, -np.inf], np.nan).dropna()
         return df
-    except:
-        return None
+    except: return None
 
 df_total = get_full_data()
 
 def treinar_modelo(df):
     if df is None: return None, None, 0
-    
     features = ['Retorno', 'Dia', 'Var_Vol', 'Dist_Banda']
     dias_teste = 30
-    
-    # Separação
     treino = df.iloc[:-dias_teste].copy()
     teste = df.iloc[-dias_teste:].copy()
     
-    # Normalização
     scaler = StandardScaler()
     X_tr = scaler.fit_transform(treino[features])
     X_ts = scaler.transform(teste[features])
     
-    # Modelo
     modelo = GradientBoostingClassifier(learning_rate=0.2, max_depth=2, n_estimators=200, random_state=42)
     modelo.fit(X_tr, treino['Tendencia'])
-    
     preds = modelo.predict(X_ts)
-    acc = accuracy_score(teste['Tendencia'], preds)
-    return teste, preds, acc
+    return teste, preds, accuracy_score(teste['Tendencia'], preds)
 
-# Execução
 teste_df, previsoes, acc = treinar_modelo(df_total)
-
-if df_total is None:
-    st.error("⚠️ Erro crítico ao processar dados. Tente recarregar.")
-    st.stop()
 
 # ==========================================
 # HEADER
@@ -118,20 +101,20 @@ with aba_geral:
     c2.write(f"**Máxima:** {df_total['High'].iloc[-1]:,.0f}".replace(",", "."))
     c2.write(f"**Mínima:** {df_total['Low'].iloc[-1]:,.0f}".replace(",", "."))
 
-# --- ABA GRÁFICO (CANDLESTICKS + VOLUME) ---
+# --- ABA GRÁFICO (CORREÇÃO DO VALUERROR) ---
 with aba_grafico:
     st.markdown("#### Terminal Avançado de Velas e Volume")
     
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
-    # Candlestick
+    # 1. Candlestick
     fig.add_trace(go.Candlestick(
         x=df_total.index, open=df_total['Open'], high=df_total['High'], 
         low=df_total['Low'], close=df_total['Close'], name='IBOV',
         increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
     ), row=1, col=1)
 
-    # Marcadores da IA
+    # 2. Sinais da IA
     sinais_y = teste_df['High'] * 1.02
     fig.add_trace(go.Scatter(
         x=teste_df.index, y=sinais_y, mode='markers', name='Previsão',
@@ -139,12 +122,15 @@ with aba_grafico:
                     size=10, symbol=['triangle-up' if p==1 else 'triangle-down' for p in previsoes])
     ), row=1, col=1)
 
-    # Volume
+    # 3. Volume
     vol_colors = ['#26a69a' if df_total['Close'].iloc[i] >= df_total['Open'].iloc[i] else '#ef5350' 
                   for i in range(len(df_total))]
     fig.add_trace(go.Bar(x=df_total.index, y=df_total['Volume'], name='Volume', marker_color=vol_colors), row=2, col=1)
 
-    fig.update_layout(template="white", xaxis_rangeslider_visible=False, height=650, showlegend=False)
+    # --- CORREÇÃO AQUI (Linha 147 no seu erro) ---
+    fig.update_xaxes(rangeslider_visible=False) # Desliga o rangeslider em todos os eixos X
+    fig.update_layout(template="plotly_white", height=650, showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
+    
     st.plotly_chart(fig, use_container_width=True)
 
 # --- ABA DADOS HISTÓRICOS ---
