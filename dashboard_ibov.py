@@ -16,22 +16,23 @@ st.set_page_config(page_title="Tech Challenge - IBOVESPA", layout="wide", page_i
 # ==========================================
 # FUNÇÕES DE DADOS E MODELO (Em Cache)
 # ==========================================
-@st.cache_data(ttl=3600) # Cache de 1 hora para evitar excesso de requisições
+@st.cache_data(ttl=3600)
 def carregar_e_treinar_modelo():
-    # 1. Coleta com Tratamento de Erro (Rate Limit)
     try:
-        # yf.download é mais estável para deploys em nuvem
+        # Coleta os dados
         df = yf.download("^BVSP", period="2y", interval="1d", progress=False)
-    except:
-        time.sleep(2)
-        df = yf.download("^BVSP", period="2y", interval="1d", progress=False)
-
-    if df.empty:
+        
+        if df.empty:
+            return None, None, None
+            
+        # --- SOLUÇÃO DO ERRO: Simplifica as colunas (Remove MultiIndex) ---
+        df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+        # Garante que as colunas sejam apenas os nomes necessários
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+        
+    except Exception as e:
         return None, None, None
 
-    # Ajuste para garantir que as colunas sejam simples (sem multi-index)
-    df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-    
     # 2. Engenharia de Features
     df['Retorno'] = df['Close'].pct_change()
     df['Variacao_Volume'] = df['Volume'].pct_change()
@@ -83,61 +84,48 @@ teste_df, previsoes_modelo, acuracia = carregar_e_treinar_modelo()
 
 # Verificação se os dados carregaram
 if teste_df is None:
-    st.error("⚠️ O Yahoo Finance limitou o acesso aos dados temporariamente. Por favor, aguarde 30 segundos e atualize a página.")
+    st.error("⚠️ Erro ao carregar dados do Yahoo Finance. Tente recarregar a página em alguns instantes.")
     st.stop()
 
 # ==========================================
-# CONSTRUÇÃO DO DASHBOARD (STORYTELLING)
+# CONSTRUÇÃO DO DASHBOARD
 # ==========================================
 
 st.title("📊 Painel Preditivo Quantitativo - IBOVESPA")
-st.markdown("Desenvolvido para auxiliar a tomada de decisão estratégica do fundo de investimentos.")
+st.markdown("Desenvolvido para apoiar decisões estratégicas do time de investimentos.")
 
 st.divider()
 
 # --- SEÇÃO 1: RESULTADOS ---
-st.header("1. Performance do Modelo")
 col1, col2, col3 = st.columns(3)
+col1.metric("Acurácia no Teste", f"{acuracia * 100:.2f}%", "Meta: 75%")
+col2.metric("Período de Dados", "2 Anos", "Histórico")
+col3.metric("Modelo", "Gradient Boosting", "Tuned")
 
-col1.metric("Acurácia no Teste (30 dias)", f"{acuracia * 100:.2f}%", "Meta: 75%", delta_color="normal")
-col2.metric("Dias Analisados", "2 Anos", "Histórico")
-col3.metric("Algoritmo Vencedor", "Gradient Boosting", "Tuning Aplicado")
-
-# --- SEÇÃO 2: GRÁFICO INTERATIVO ---
-st.header("2. Previsão vs Realidade (Último Mês)")
-
+# --- SEÇÃO 2: GRÁFICO ---
+st.header("Sinais de Tendência (Últimos 30 Dias)")
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=teste_df.index, y=teste_df['Close'], mode='lines', name='Preço Fechamento (IBOV)', line=dict(color='white', width=2)))
+fig.add_trace(go.Scatter(x=teste_df.index, y=teste_df['Close'], mode='lines', name='IBOV', line=dict(color='white')))
 
 cores = ['#00FF00' if p == 1 else '#FF0000' for p in previsoes_modelo]
-simbolos = ['triangle-up' if p == 1 else 'triangle-down' for p in previsoes_modelo]
-textos_hover = ['Previu ALTA (↑)' if p == 1 else 'Previu BAIXA (↓)' for p in previsoes_modelo]
-
 fig.add_trace(go.Scatter(
-    x=teste_df.index, y=teste_df['Close'], mode='markers', name='Sinal do Modelo',
-    marker=dict(color=cores, symbol=simbolos, size=12, line=dict(width=1, color='black')),
-    hoverinfo='text', hovertext=textos_hover
+    x=teste_df.index, y=teste_df['Close'], mode='markers', name='Previsão',
+    marker=dict(color=cores, size=10, symbol=['triangle-up' if p==1 else 'triangle-down' for p in previsoes_modelo])
 ))
-
-fig.update_layout(template="plotly_dark", hovermode="x unified", height=500)
+fig.update_layout(template="plotly_dark", height=450)
 st.plotly_chart(fig, use_container_width=True)
 
-# --- SEÇÃO 3: EXPLICAÇÃO TÉCNICA ---
-st.header("3. Justificativa Técnica")
-
-with st.expander("Por que o Gradient Boosting foi escolhido?"):
-    st.write("O Gradient Boosting constrói árvores em sequência para corrigir erros anteriores, sendo ideal para padrões não-lineares da bolsa.")
-
-with st.expander("Veja a Tabela de Previsões Bruta"):
-    tabela_final = pd.DataFrame({
-        'Fechamento Real': teste_df['Close'].values.flatten().round(2),
-        'Movimento Real': ['▲ Alta' if val == 1 else '▼ Baixa' for val in teste_df['Tendencia']],
-        'Previsão do Modelo': ['▲ Alta' if val == 1 else '▼ Baixa' for val in previsoes_modelo]
+# --- SEÇÃO 3: TABELA ---
+with st.expander("Ver Tabela Detalhada"):
+    tabela = pd.DataFrame({
+        'Preço': teste_df['Close'].values.flatten().round(2),
+        'Real': ['▲ Alta' if v == 1 else '▼ Baixa' for v in teste_df['Tendencia']],
+        'Previsão': ['▲ Alta' if v == 1 else '▼ Baixa' for v in previsoes_modelo]
     }, index=teste_df.index)
     
-    def colorir_texto(valor):
-        if 'Alta' in str(valor): return 'color: #00FF00; font-weight: bold;'
-        if 'Baixa' in str(valor): return 'color: #FF0000; font-weight: bold;'
+    def colorir(v):
+        if 'Alta' in str(v): return 'color: #00FF00'
+        if 'Baixa' in str(v): return 'color: #FF0000'
         return ''
         
-    st.dataframe(tabela_final.style.applymap(colorir_texto, subset=['Movimento Real', 'Previsão do Modelo']), use_container_width=True)
+    st.dataframe(tabela.style.applymap(colorir), use_container_width=True)
