@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import time
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score
@@ -15,10 +16,20 @@ st.set_page_config(page_title="Tech Challenge - IBOVESPA", layout="wide", page_i
 # ==========================================
 # FUNÇÕES DE DADOS E MODELO (Em Cache)
 # ==========================================
-@st.cache_data
+@st.cache_data(ttl=3600) # Cache de 1 hora para evitar excesso de requisições
 def carregar_e_treinar_modelo():
-    # 1. Coleta
-    df = yf.Ticker("^BVSP").history(period="2y", interval="1d")
+    # 1. Coleta com Tratamento de Erro (Rate Limit)
+    try:
+        # yf.download é mais estável para deploys em nuvem
+        df = yf.download("^BVSP", period="2y", interval="1d", progress=False)
+    except:
+        time.sleep(2)
+        df = yf.download("^BVSP", period="2y", interval="1d", progress=False)
+
+    if df.empty:
+        return None, None, None
+
+    # Ajuste para garantir que as colunas sejam simples (sem multi-index)
     df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
     
     # 2. Engenharia de Features
@@ -70,6 +81,11 @@ def carregar_e_treinar_modelo():
 # Executa a função principal
 teste_df, previsoes_modelo, acuracia = carregar_e_treinar_modelo()
 
+# Verificação se os dados carregaram
+if teste_df is None:
+    st.error("⚠️ O Yahoo Finance limitou o acesso aos dados temporariamente. Por favor, aguarde 30 segundos e atualize a página.")
+    st.stop()
+
 # ==========================================
 # CONSTRUÇÃO DO DASHBOARD (STORYTELLING)
 # ==========================================
@@ -87,81 +103,41 @@ col1.metric("Acurácia no Teste (30 dias)", f"{acuracia * 100:.2f}%", "Meta: 75%
 col2.metric("Dias Analisados", "2 Anos", "Histórico")
 col3.metric("Algoritmo Vencedor", "Gradient Boosting", "Tuning Aplicado")
 
-st.markdown("""
-O modelo superou a métrica de acurácia de 75% exigida pela diretoria. Ele foi capaz de identificar padrões ocultos no estresse de mercado e volume financeiro para prever a direção do fechamento diário.
-""")
-
 # --- SEÇÃO 2: GRÁFICO INTERATIVO ---
 st.header("2. Previsão vs Realidade (Último Mês)")
 
 fig = go.Figure()
-
-# Linha do preço real
 fig.add_trace(go.Scatter(x=teste_df.index, y=teste_df['Close'], mode='lines', name='Preço Fechamento (IBOV)', line=dict(color='white', width=2)))
 
-# Marcadores de previsão
 cores = ['#00FF00' if p == 1 else '#FF0000' for p in previsoes_modelo]
 simbolos = ['triangle-up' if p == 1 else 'triangle-down' for p in previsoes_modelo]
 textos_hover = ['Previu ALTA (↑)' if p == 1 else 'Previu BAIXA (↓)' for p in previsoes_modelo]
 
 fig.add_trace(go.Scatter(
-    x=teste_df.index, 
-    y=teste_df['Close'], 
-    mode='markers', 
-    name='Sinal do Modelo',
+    x=teste_df.index, y=teste_df['Close'], mode='markers', name='Sinal do Modelo',
     marker=dict(color=cores, symbol=simbolos, size=12, line=dict(width=1, color='black')),
-    hoverinfo='text',
-    hovertext=textos_hover
+    hoverinfo='text', hovertext=textos_hover
 ))
 
-fig.update_layout(
-    title="Sinais de Compra/Venda Gerados pela Inteligência Artificial",
-    xaxis_title="Data",
-    yaxis_title="Pontos",
-    template="plotly_dark",
-    hovermode="x unified"
-)
-
+fig.update_layout(template="plotly_dark", hovermode="x unified", height=500)
 st.plotly_chart(fig, use_container_width=True)
 
 # --- SEÇÃO 3: EXPLICAÇÃO TÉCNICA ---
 st.header("3. Justificativa Técnica")
 
 with st.expander("Por que o Gradient Boosting foi escolhido?"):
-    st.write("""
-    A bolsa de valores apresenta relações complexas e não-lineares. O Gradient Boosting constrói uma sequência de modelos mais simples (árvores rasas), onde cada nova árvore foca exclusivamente em corrigir os erros das árvores anteriores. 
-    Para evitar Overfitting (decorar o passado), limitamos a profundidade das árvores (`max_depth=2`), forçando o modelo a aprender apenas a macro-tendência em vez de ruídos diários.
-    """)
-
-with st.expander("Quais variáveis (Features) o modelo usa?"):
-    st.write("""
-    1. **Retornos Históricos (Lags):** Variação de D-1 e D-2 para capturar a inércia do movimento.
-    2. **Estresse do Mercado:** Distância do preço atual para a Banda Superior de Bollinger (20 períodos).
-    3. **Fluxo:** Variação percentual do Volume Financeiro negociado.
-    4. **Sazonalidade:** Dia da semana, mapeando anomalias comuns de segundas e sextas-feiras.
-    """)
+    st.write("O Gradient Boosting constrói árvores em sequência para corrigir erros anteriores, sendo ideal para padrões não-lineares da bolsa.")
 
 with st.expander("Veja a Tabela de Previsões Bruta"):
-    # Prepara os dados com as setinhas
     tabela_final = pd.DataFrame({
-        'Fechamento Real': teste_df['Close'].round(2),
+        'Fechamento Real': teste_df['Close'].values.flatten().round(2),
         'Movimento Real': ['▲ Alta' if val == 1 else '▼ Baixa' for val in teste_df['Tendencia']],
         'Previsão do Modelo': ['▲ Alta' if val == 1 else '▼ Baixa' for val in previsoes_modelo]
-    })
+    }, index=teste_df.index)
     
-    # Função para injetar CSS nas cores
     def colorir_texto(valor):
-        if 'Alta' in str(valor):
-            return 'color: #00FF00; font-weight: bold;'
-        elif 'Baixa' in str(valor):
-            return 'color: #FF0000; font-weight: bold;'
+        if 'Alta' in str(valor): return 'color: #00FF00; font-weight: bold;'
+        if 'Baixa' in str(valor): return 'color: #FF0000; font-weight: bold;'
         return ''
         
-    # Aplica o estilo na tabela
-    try:
-        tabela_estilizada = tabela_final.style.map(colorir_texto, subset=['Movimento Real', 'Previsão do Modelo'])
-    except AttributeError:
-        # Fallback para versões mais antigas do Pandas
-        tabela_estilizada = tabela_final.style.applymap(colorir_texto, subset=['Movimento Real', 'Previsão do Modelo'])
-        
-    st.dataframe(tabela_estilizada, use_container_width=True)
+    st.dataframe(tabela_final.style.applymap(colorir_texto, subset=['Movimento Real', 'Previsão do Modelo']), use_container_width=True)
